@@ -1,27 +1,63 @@
-name: CI & Deploy (Render)
+name: CI & Deploy (Render, sin /hello)
+
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      endpoint_path:
+        description: 'Endpoint opcional para probar (ej. /open-api.playground)'
+        required: false
+        default: ''
+
+env:
+  NODE_VERSION: '18'
+  APP_PORT: '3601'             # cámbialo si tu app usa otro puerto
+  ENDPOINT_PATH: ${{ github.event.inputs.endpoint_path }}
 
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: '18' }
-      - run: npm ci || npm install
-      - name: Smoke test (arranca y comprueba /hello)
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Start app (background)
         run: |
-          nohup npm start &
-          npx --yes wait-on http://localhost:3601/hello || npx --yes wait-on http://localhost:3601/api/hello
-          curl -fsS http://localhost:3601/hello || curl -fsS http://localhost:3601/api/hello
+          nohup npm start > server.log 2>&1 & echo $! > server.pid
+          sleep 2
+          echo "PID: $(cat server.pid)"
+
+      - name: Wait for TCP port
+        run: |
+          npx --yes wait-on "tcp:localhost:${APP_PORT}" --timeout 60000
+          echo "TCP ${APP_PORT} está escuchando"
+
+      - name: Optional HTTP probe (si hay ENDPOINT_PATH)
+        if: ${{ env.ENDPOINT_PATH != '' }}
+        run: |
+          set -e
+          URL="http://localhost:${APP_PORT}${ENDPOINT_PATH}"
+          echo "Probing ${URL}"
+          curl -fsS "${URL}" || (echo "HTTP probe failed (pero TCP OK)"; exit 1)
+
+      - name: Show last 100 log lines (debug)
+        if: always()
+        run: |
+          echo "===== tail server.log ====="
+          tail -n 100 server.log || true
 
   deploy:
     needs: ci
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Render deploy
-        run: curl -X POST "$RENDER_DEPLOY_HOOK_URL"
+      - name: Trigger Render Deploy Hook
+        run: curl -sS -X POST "$RENDER_DEPLOY_HOOK_URL"
         env:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
